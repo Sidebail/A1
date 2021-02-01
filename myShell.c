@@ -6,6 +6,7 @@
 #include <errno.h>       /* Errors */
 #include <string.h>
 #include <signal.h>
+#include <fcntl.h>
 
 #define INPUT_MAX 128
 
@@ -22,7 +23,8 @@ void sigquit(int signo) {
     exit(0);
 }
 
-void tltrn_RunProcess(char* arguments[], int returnImm, int input, int output, char* fileNameOut, char* fileNameIn)
+void tltrn_RunProcess(char* arguments[], int returnImm, int input, 
+    int output, char* fileNameIn, char* fileNameOut, int piped, char* secondArguments[])
 {
     /**
      * Sigaction declaration
@@ -30,6 +32,8 @@ void tltrn_RunProcess(char* arguments[], int returnImm, int input, int output, c
     struct sigaction sigact;
     sigact.sa_flags = 0;
     sigemptyset(&sigact.sa_mask);
+
+    int pipefd[2];
 
     sigact.sa_handler = sigquit;
     if (sigaction(SIGQUIT, &sigact, NULL) < 0) {
@@ -39,8 +43,17 @@ void tltrn_RunProcess(char* arguments[], int returnImm, int input, int output, c
     
     pid_t childpid;
     int status;
-    FILE* file_in;
-    FILE* file_out;
+    int file_in;
+    int file_out;
+    char child_output[1024];
+    if(piped)
+    {
+        if(pipe(pipefd) != -1)
+        {
+            printf("Pipe Created!\n");
+        }
+    }
+        
     childpid = fork();
     if ( childpid >= 0 ) 
     {/* fork succeeded */
@@ -49,20 +62,37 @@ void tltrn_RunProcess(char* arguments[], int returnImm, int input, int output, c
         */
         if ( childpid == 0 ) {   
          
-            printf("%s\n", "Child");
+            
             if(input)
             {
-                file_in = freopen(strcat(fileNameIn, ".txt"), "r", stdin);
+               
+                file_in = open(fileNameIn, O_RDWR | O_CREAT, S_IRUSR | S_IWUSR);
+                dup2(file_in, 0);
             }
             if(output)
             {
-                file_out = freopen(strcat(fileNameOut, ".txt"), "w+", stdout);
+                printf("%s\n", fileNameOut);
+                file_out = open(fileNameOut, O_RDWR | O_CREAT, S_IRUSR | S_IWUSR);
+                dup2(file_out, 1);
+                
             }
+            if(piped)
+            {
+                close(STDOUT_FILENO);
+                dup(pipefd[1]);
+                close(pipefd[0]);
+                close(pipefd[1]);
+                
+            }
+
             status = execvp (arguments[0], arguments);
-            printf("FILE - , file_out\n");
-            fclose(file_in);
-            fclose(file_out);
-            exit(-1);
+            
+            if(input)
+                close(file_in);
+            if(output)
+                close(file_out);
+           
+            exit(errno);
         } 
         else 
         {   
@@ -73,27 +103,66 @@ void tltrn_RunProcess(char* arguments[], int returnImm, int input, int output, c
             sigaction(SIGQUIT, &sigact, NULL); 
             if(returnImm == 0)
             {
+                
                 waitpid(childpid,&status,0);
-                kill(childpid, SIGQUIT);
+                if(WIFEXITED(status) && WEXITSTATUS(status) != 0)
+                {
+                    printf("Shell error -- System sent error code %d\n", WEXITSTATUS(status));
+                    if(WEXITSTATUS(status) == 2)
+                    {
+                        printf("Shell error -- No such command found!\n");
+                    }
+                }
+                
             }
-            else
+
+            if(piped)
             {
-                /* pid holds the id of child */
-                //sleep(1); /* pause for 1 secs */
-                //kill(childpid, SIGQUIT);
+                pid_t pipeChild = fork();
+                int pipeStatus;
+                if(pipeChild==0)
+                {
+                    close(STDIN_FILENO);
+                    dup(pipefd[0]);
+                    close(pipefd[1]);
+                    close(pipefd[0]);
+
+                    /**
+                    printf("%s\n", secondArguments[0]);
+                    int bytesAmount = read(pipefd[0], child_output, sizeof(child_output));
+                    int i = 0;
+                    for(i = 0; secondArguments[i] != NULL; i++);
+                    secondArguments[i] = malloc(sizeof(child_output));
+                    memcpy(secondArguments[i], child_output, sizeof(child_output));               
+                    secondArguments[i+1] = NULL;
+                    //printf("Output: %ld\n", sizeof(secondArguments) / sizeof(secondArguments[0]));
+                    */
+                    pipeStatus = execvp(secondArguments[0], secondArguments);
+                    exit(1);
+                }
+                else
+                {
+                    close(pipefd[0]);
+                    close(pipefd[1]);
+                    waitpid(pipeChild, &pipeStatus, 0);
+                }
+                
             }
+
+            
             
         }
     } 
     else 
     {
-      perror("fork");
-      exit(-1);
+        printf("ERROR OCCURED DURINF FORK!\n");
+        perror("fork");
+        exit(-1);
     }
 
 }
 
-void interpretCommand(char* arguments[], int returnImm, int input, int output, char* fileNameIn, char* fileNameOut)
+void interpretCommand(char* arguments[], int returnImm, int input, int output, char* fileNameIn, char* fileNameOut, char* secondArguments[], int piped)
 {
     
     if(strcmp(arguments[0], tltrn_kill) == 0)
@@ -103,7 +172,7 @@ void interpretCommand(char* arguments[], int returnImm, int input, int output, c
     else
     {
         
-        tltrn_RunProcess(arguments, returnImm, input, output, fileNameIn, fileNameOut);
+        tltrn_RunProcess(arguments, returnImm, input, output, fileNameIn, fileNameOut, piped, secondArguments);
     }
 
     
@@ -114,6 +183,8 @@ int main(int argc, char *argv[])
 {
     char input[INPUT_MAX - 2];
     char* inputArguments[32];
+    char* firstArguments[32];
+    //char* secondArguments[32];
     //char currentArgument[INPUT_MAX - 2];
     char* fileNameOut;
     char* fileNameIn;
@@ -127,6 +198,11 @@ int main(int argc, char *argv[])
     int fileOutput = 0;
 
     int inArgument = 0;
+    int piped = 0;
+
+    char PATHvar[] = "/bin";
+    char HISTFILEvar[] = "./CIS3110_history";
+    char HOMEvar[] = "./";
 
     /**
      * Sigaction declaration and initialization
@@ -161,6 +237,10 @@ int main(int argc, char *argv[])
         argumentsAmount = 0;
         returnImm = 0;
         fileSpecified = 0;
+        fileInput = 0;
+        fileOutput = 0;
+        piped = 0;
+        inArgument = 0;
 
         printf ("cybertronian@tltrn:>> ");
         fgets(input, INPUT_MAX, stdin);
@@ -198,7 +278,43 @@ int main(int argc, char *argv[])
                     printf("|%s|\n", fileNameOut);
                 }
 
-            } 
+            }
+
+            if(input[i] == '<' && fileSpecified == 0)
+            {
+                printf("CHECK\n");
+                fileSpecified = 1;
+                fileInput = 1;
+                fileNameIn = malloc((strlen(input) - i) * sizeof(char));
+                if(input[i+1] == ' ')
+                {
+                    memcpy(fileNameIn, &input[i+2], strlen(input) - i);
+                    printf("|%s|\n", fileNameIn);
+                }
+                else
+                {
+                    memcpy(fileNameIn, &input[i+1], strlen(input) - i);
+                    printf("|%s|\n", fileNameIn);
+                }
+
+            }
+
+            if(input[i] == '|' && fileSpecified == 0)
+            {
+                piped = 1;
+                for(int i = 0; i < argumentsAmount; i++)
+                {
+                    firstArguments[i] = malloc(strlen(inputArguments[i]));
+                    strcpy(firstArguments[i], inputArguments[i]);
+                    memset(inputArguments[i],'\0',strlen(inputArguments[i]));
+                }
+                firstArguments[argumentsAmount] = NULL;
+
+                argumentsAmount = 0;
+                continue;
+                
+
+            }
 
             /**
              * Check for the argument entry!
@@ -239,33 +355,30 @@ int main(int argc, char *argv[])
     
         if(currentEntryIndex != -1)
         {
-             if(strcmp(inputArguments[argumentsAmount-1], "&") == 0)
-        {
-            printf("Terminator\n");
-            returnImm = 1;
-            inputArguments[argumentsAmount-1] = NULL;
+            if(strcmp(inputArguments[argumentsAmount-1], "&") == 0)
+            {
+                printf("Terminator\n");
+                returnImm = 1;
+                inputArguments[argumentsAmount-1] = NULL;
+            }
+            else
+            {
+                //inputArguments[argumentsAmount] = malloc(0);
+                inputArguments[argumentsAmount] = NULL;
+            }
+            
+            if(piped == 0)
+            {
+                interpretCommand(inputArguments, returnImm, fileInput, fileOutput, fileNameIn, fileNameOut, NULL, piped);
+            }
+            else
+            {
+                interpretCommand(firstArguments, returnImm, fileInput, fileOutput, fileNameIn, fileNameOut, inputArguments, piped);
+            }
+            
+                    
         }
-        else
-        {
-            //inputArguments[argumentsAmount] = malloc(0);
-            inputArguments[argumentsAmount] = NULL;
-        }
-        
-            interpretCommand(inputArguments, returnImm, fileInput, fileOutput, fileNameIn, fileNameOut);
-        }
-       
-
-        /**
-        for(int i=0;i<argumentsAmount;i++)
-            printf("|%s|\n", inputArguments[i]);
-
-        for(int i=0;i<argumentsAmount;i++)
-            memset(inputArguments[i],'\0',strlen(inputArguments[i]));
-        
-        memset(temp,'\0',strlen(temp));
-        */
-        
-        
+               
     }    
     return 0;
 }
